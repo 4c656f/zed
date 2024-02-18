@@ -164,6 +164,8 @@ pub struct ProjectSearchView {
     excluded_files_editor: View<Editor>,
     filters_enabled: bool,
     replace_enabled: bool,
+    included_files_editor_state: String,
+    excluded_files_editor_state: String,
     current_mode: SearchMode,
     _subscriptions: Vec<Subscription>,
 }
@@ -179,6 +181,8 @@ struct ProjectSearchSettings {
     search_options: SearchOptions,
     filters_enabled: bool,
     current_mode: SearchMode,
+    included_files_editor_state: String,
+    excluded_files_editor_state: String,
 }
 
 pub struct ProjectSearchBar {
@@ -644,6 +648,8 @@ impl ProjectSearchView {
             search_options: self.search_options,
             filters_enabled: self.filters_enabled,
             current_mode: self.current_mode,
+            included_files_editor_state: self.included_files_editor_state.clone(),
+            excluded_files_editor_state: self.excluded_files_editor_state.clone(),
         }
     }
     fn toggle_search_option(&mut self, option: SearchOptions, cx: &mut ViewContext<Self>) {
@@ -796,6 +802,51 @@ impl ProjectSearchView {
 
         cx.notify();
     }
+    fn handle_included_files_editor_events(
+        &mut self,
+        _: View<Editor>,
+        event: &EditorEvent,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if let EditorEvent::Edited = event {
+            self.included_files_editor_state = self.included_files_editor.read(cx).text(cx);
+            cx.update_global(|state: &mut ActiveSettings, cx| {
+                let project_key = self.model.read(cx).project.downgrade();
+                let global_state = state.0.get_mut(&project_key);
+
+                if let Some(global_state) = global_state {
+                    global_state.included_files_editor_state =
+                        self.included_files_editor_state.clone();
+                } else {
+                    state.0.insert(project_key, self.current_settings());
+                }
+            });
+        }
+        // Subscribe to include_files_editor in order to reraise editor events for workspace item activation purposes
+        cx.emit(ViewEvent::EditorEvent(event.clone()))
+    }
+    fn handle_excluded_files_editor_events(
+        &mut self,
+        _: View<Editor>,
+        event: &EditorEvent,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if let EditorEvent::Edited = event {
+            self.excluded_files_editor_state = self.excluded_files_editor.read(cx).text(cx);
+            cx.update_global(|state: &mut ActiveSettings, cx| {
+                let project_key = self.model.read(cx).project.downgrade();
+                let global_state = state.0.get_mut(&project_key);
+                if let Some(global_state) = global_state {
+                    global_state.excluded_files_editor_state =
+                        self.excluded_files_editor_state.clone();
+                } else {
+                    state.0.insert(project_key, self.current_settings());
+                }
+            });
+        }
+        // Subscribe to include_files_editor in order to reraise editor events for workspace item activation purposes
+        cx.emit(ViewEvent::EditorEvent(event.clone()))
+    }
     fn replace_next(&mut self, _: &ReplaceNext, cx: &mut ViewContext<Self>) {
         let model = self.model.read(cx);
         if let Some(query) = model.active_query.as_ref() {
@@ -848,14 +899,22 @@ impl ProjectSearchView {
         let mut subscriptions = Vec::new();
 
         // Read in settings if available
-        let (mut options, current_mode, filters_enabled) = if let Some(settings) = settings {
+        let (
+            mut options,
+            current_mode,
+            filters_enabled,
+            included_files_editor_state,
+            excluded_files_editor_state,
+        ) = if let Some(settings) = settings {
             (
                 settings.search_options,
                 settings.current_mode,
                 settings.filters_enabled,
+                Some(settings.included_files_editor_state),
+                Some(settings.excluded_files_editor_state),
             )
         } else {
-            (SearchOptions::NONE, Default::default(), false)
+            (SearchOptions::NONE, Default::default(), false, None, None)
         };
 
         {
@@ -909,29 +968,33 @@ impl ProjectSearchView {
 
         let included_files_editor = cx.new_view(|cx| {
             let mut editor = Editor::single_line(cx);
+            if let Some(included_files_editor_state) = included_files_editor_state.clone() {
+                editor.set_text(included_files_editor_state, cx);
+            }
             editor.set_placeholder_text("Include: crates/**/*.toml", cx);
 
             editor
         });
         // Subscribe to include_files_editor in order to reraise editor events for workspace item activation purposes
-        subscriptions.push(
-            cx.subscribe(&included_files_editor, |_, _, event: &EditorEvent, cx| {
-                cx.emit(ViewEvent::EditorEvent(event.clone()))
-            }),
-        );
+        subscriptions.push(cx.subscribe(
+            &included_files_editor,
+            Self::handle_included_files_editor_events,
+        ));
 
         let excluded_files_editor = cx.new_view(|cx| {
             let mut editor = Editor::single_line(cx);
+            if let Some(excluded_files_editor_state) = excluded_files_editor_state.clone() {
+                editor.set_text(excluded_files_editor_state, cx);
+            }
             editor.set_placeholder_text("Exclude: vendor/*, *.lock", cx);
-
+            
             editor
         });
         // Subscribe to excluded_files_editor in order to reraise editor events for workspace item activation purposes
-        subscriptions.push(
-            cx.subscribe(&excluded_files_editor, |_, _, event: &EditorEvent, cx| {
-                cx.emit(ViewEvent::EditorEvent(event.clone()))
-            }),
-        );
+        subscriptions.push(cx.subscribe(
+            &excluded_files_editor,
+            Self::handle_excluded_files_editor_events,
+        ));
 
         let focus_handle = cx.focus_handle();
         subscriptions.push(cx.on_focus_in(&focus_handle, |this, cx| {
@@ -960,6 +1023,8 @@ impl ProjectSearchView {
             query_editor_was_focused: false,
             included_files_editor,
             excluded_files_editor,
+            included_files_editor_state: included_files_editor_state.unwrap_or(String::new()),
+            excluded_files_editor_state: excluded_files_editor_state.unwrap_or(String::new()),
             filters_enabled,
             current_mode,
             replace_enabled: false,
